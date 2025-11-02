@@ -196,8 +196,9 @@ def too_large(e):
 if __name__ == "__main__":
     try:
         logger.info("Starting Flask application...")
-        detector = get_emotion_detector()
-        logger.info("Model initialized successfully!")
+        # Don't force model initialization at startup on low-memory hosts
+        # detector = get_emotion_detector()
+        # logger.info("Model initialized successfully!")
     except Exception as e:
         logger.error(f"Error initializing model: {str(e)}")
 

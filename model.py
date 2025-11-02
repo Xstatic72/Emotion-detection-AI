@@ -5,6 +5,9 @@ Simplified emotion detection using a single Hugging Face model for image upload 
 """
 
 import os
+# Force CPU-only in constrained deploy environments to avoid accidental CUDA allocations
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
 import torch
 from PIL import Image
 import numpy as np
@@ -33,6 +36,7 @@ class EmotionDetector:
         self.model_name = model_name
         self.model = None
         self.processor = None
+        self._loaded = False
         self.emotion_labels = [
             "angry",
             "disgust",
@@ -47,8 +51,8 @@ class EmotionDetector:
         # Initialize database
         self._init_database()
 
-        # Load model
-        self.load_model()
+        # NOTE: do NOT load the model at import time to avoid OOM on small instances.
+        # self.load_model()  # removed to defer loading
 
     def _init_database(self):
         """Initialize SQLite database for storing predictions"""
@@ -75,25 +79,33 @@ class EmotionDetector:
         except Exception as e:
             logger.error(f"Error initializing database: {str(e)}")
 
-    def load_model(self):
+    def load_model(self, device="cpu"):
         """
-        Load the Hugging Face model and processor
+        Load the Hugging Face model and processor in a memory-friendly way.
+        Returns True on success, False on failure.
         """
-        try:
-            logger.info(f"Loading emotion detection model: {self.model_name}")
+        if self._loaded:
+            return True
 
-            # Load processor and model
+        try:
+            logger.info(f"Loading emotion detection model (device={device}): {self.model_name}")
+
+            # Use memory-friendly flags. Force CPU device_map to reduce GPU/CUDA usage.
             self.processor = AutoImageProcessor.from_pretrained(self.model_name)
             self.model = AutoModelForImageClassification.from_pretrained(
-                self.model_name, torch_dtype=torch.float32
+                self.model_name,
+                device_map={"": device},
+                low_cpu_mem_usage=True,
             )
 
-            # Set model to evaluation mode
             self.model.eval()
-
+            self._loaded = True
             logger.info("Model loaded successfully!")
             return True
 
+        except MemoryError as me:
+            logger.error(f"MemoryError loading model: {me}")
+            return False
         except Exception as e:
             logger.error(f"Error loading model: {str(e)}")
             return False
@@ -248,6 +260,10 @@ def predict_emotion(image_input, source="unknown"):
         dict: Prediction results
     """
     detector = get_emotion_detector()
+    # Lazy-load the heavy model on first prediction (avoid startup OOM)
+    if not detector._loaded:
+        if not detector.load_model(device="cpu"):
+            raise RuntimeError("Failed to load model due to memory constraints.")
     return detector.predict_emotion(image_input, source)
 
 
