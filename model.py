@@ -1,58 +1,47 @@
 """
-Simple Emotion Detection Model Module
-====================================
-Simplified emotion detection using a single Hugging Face model for image upload only.
+Emotion Detection Model Module
+==============================
+Trains and uses a CNN model for emotion detection from images.
+Uses FER-2013 dataset for training.
 """
 
 import os
-# Force CPU-only in constrained deploy environments to avoid accidental CUDA allocations
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-
-import torch
-from PIL import Image
+import requests
+import pandas as pd
 import numpy as np
-from transformers import AutoImageProcessor, AutoModelForImageClassification
+from PIL import Image
 import sqlite3
 from datetime import datetime
 import logging
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import matplotlib.pyplot as plt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Emotion labels
+EMOTION_LABELS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+MODEL_PATH = "model.h5"
+DATASET_URL = "https://www.kaggle.com/api/v1/datasets/download/msambare/fer2013"
+DATASET_PATH = "fer2013.csv"
 
 class EmotionDetector:
     """
-    Simple emotion detection class using a single Hugging Face model
+    Emotion detection class using a trained Keras CNN model
     """
 
-    def __init__(self, model_name="dima806/facial_emotions_image_detection"):
-        """
-        Initialize the emotion detector with the specified model
-
-        Args:
-            model_name (str): Hugging Face model identifier
-        """
-        self.model_name = model_name
+    def __init__(self):
         self.model = None
-        self.processor = None
         self._loaded = False
-        self.emotion_labels = [
-            "angry",
-            "disgust",
-            "fear",
-            "happy",
-            "neutral",
-            "sad",
-            "surprise",
-        ]
+        self.emotion_labels = EMOTION_LABELS
         self.db_path = "emotion_predictions.db"
-
-        # Initialize database
         self._init_database()
-
-        # NOTE: do NOT load the model at import time to avoid OOM on small instances.
-        # self.load_model()  # removed to defer loading
 
     def _init_database(self):
         """Initialize SQLite database for storing predictions"""
@@ -60,17 +49,24 @@ class EmotionDetector:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
-            # Create predictions table if it doesn't exist
+            # Create predictions table if it doesn't exist (updated to include user_name)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS predictions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
+                    user_name TEXT,
                     predicted_emotion TEXT NOT NULL,
                     confidence REAL NOT NULL,
                     image_path TEXT,
                     source TEXT DEFAULT 'unknown'
                 )
             """)
+
+            # Check if user_name column exists, add if not
+            cursor.execute("PRAGMA table_info(predictions)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'user_name' not in columns:
+                cursor.execute("ALTER TABLE predictions ADD COLUMN user_name TEXT")
 
             conn.commit()
             conn.close()
@@ -79,36 +75,157 @@ class EmotionDetector:
         except Exception as e:
             logger.error(f"Error initializing database: {str(e)}")
 
-    def load_model(self, device="cpu"):
-        """
-        Load the Hugging Face model and processor in a memory-friendly way.
-        Returns True on success, False on failure.
-        """
+    def download_dataset(self):
+        """Download FER-2013 dataset if not present"""
+        if os.path.exists(DATASET_PATH):
+            logger.info("Dataset already exists")
+            return
+
+        logger.info("Downloading FER-2013 dataset...")
+        try:
+            response = requests.get(DATASET_URL, timeout=30)
+            if response.status_code == 200 and 'text/csv' in response.headers.get('content-type', ''):
+                with open(DATASET_PATH, 'wb') as f:
+                    f.write(response.content)
+                logger.info("Dataset downloaded successfully")
+            else:
+                logger.warning(f"Could not download dataset (status: {response.status_code}). Will use sample data.")
+                # Create empty file to trigger sample data creation
+                with open(DATASET_PATH, 'w') as f:
+                    f.write("emotion,pixels\n")
+        except Exception as e:
+            logger.warning(f"Error downloading dataset: {e}. Will use sample data.")
+            # Create empty file to trigger sample data creation
+            with open(DATASET_PATH, 'w') as f:
+                f.write("emotion,pixels\n")
+
+    def load_and_preprocess_data(self):
+        """Load and preprocess FER-2013 dataset"""
+        self.download_dataset()
+
+        try:
+            data = pd.read_csv(DATASET_PATH)
+            
+            # Check if the CSV has the expected structure
+            if 'pixels' not in data.columns or 'emotion' not in data.columns:
+                logger.error("Invalid dataset format. Creating sample data for demonstration...")
+                # Create a small sample dataset for demonstration
+                return self._create_sample_data()
+            
+            # Filter by Usage if column exists, otherwise use all data
+            if 'Usage' in data.columns:
+                data = data[data['Usage'] == 'Training']
+            
+            # Limit dataset size for faster training (use first 10000 samples)
+            data = data.head(10000)
+
+            pixels = data['pixels'].tolist()
+            emotions = data['emotion'].tolist()
+
+            X = []
+            for pixel_sequence in pixels:
+                face = [int(pixel) for pixel in pixel_sequence.split(' ')]
+                face = np.asarray(face).reshape(48, 48)
+                face = face / 255.0  # Normalize
+                X.append(face)
+
+            X = np.asarray(X).reshape(-1, 48, 48, 1)
+            y = to_categorical(emotions, num_classes=7)
+
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+            return X_train, X_val, y_train, y_val
+            
+        except Exception as e:
+            logger.error(f"Error loading dataset: {e}. Creating sample data...")
+            return self._create_sample_data()
+    
+    def _create_sample_data(self):
+        """Create sample data for demonstration when real dataset is unavailable"""
+        logger.info("Creating sample training data...")
+        # Create 1000 random samples
+        n_samples = 1000
+        X = np.random.rand(n_samples, 48, 48, 1)
+        y = to_categorical(np.random.randint(0, 7, n_samples), num_classes=7)
+        
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+        return X_train, X_val, y_train, y_val
+
+    def build_model(self):
+        """Build CNN model"""
+        model = Sequential([
+            Conv2D(32, (3, 3), activation='relu', input_shape=(48, 48, 1)),
+            MaxPooling2D((2, 2)),
+            Conv2D(64, (3, 3), activation='relu'),
+            MaxPooling2D((2, 2)),
+            Conv2D(128, (3, 3), activation='relu'),
+            MaxPooling2D((2, 2)),
+            Flatten(),
+            Dense(128, activation='relu'),
+            Dropout(0.5),
+            Dense(7, activation='softmax')
+        ])
+
+        model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+        return model
+
+    def train_model(self):
+        """Train the model and save it"""
+        logger.info("Loading and preprocessing data...")
+        X_train, X_val, y_train, y_val = self.load_and_preprocess_data()
+
+        logger.info("Building model...")
+        model = self.build_model()
+
+        # Data augmentation
+        datagen = ImageDataGenerator(
+            rotation_range=10,
+            width_shift_range=0.1,
+            height_shift_range=0.1,
+            horizontal_flip=True
+        )
+
+        logger.info("Training model...")
+        history = model.fit(
+            datagen.flow(X_train, y_train, batch_size=64),
+            validation_data=(X_val, y_val),
+            epochs=25,  # Reduced from 50 for faster training
+            verbose=1
+        )
+
+        # Save the model
+        model.save(MODEL_PATH)
+        logger.info(f"Model saved to {MODEL_PATH}")
+
+        # Plot training history
+        try:
+            plt.figure(figsize=(10, 5))
+            plt.plot(history.history['accuracy'], label='accuracy')
+            plt.plot(history.history['val_accuracy'], label='val_accuracy')
+            plt.xlabel('Epoch')
+            plt.ylabel('Accuracy')
+            plt.legend()
+            plt.savefig('training_history.png')
+            logger.info("Training history saved to training_history.png")
+        except Exception as e:
+            logger.warning(f"Could not save training plot: {e}")
+
+        return model
+
+    def load_model(self):
+        """Load the trained model"""
         if self._loaded:
             return True
 
-        try:
-            logger.info(f"Loading emotion detection model (device={device}): {self.model_name}")
+        if not os.path.exists(MODEL_PATH):
+            logger.info("Model not found, training new model...")
+            self.model = self.train_model()
+        else:
+            logger.info(f"Loading model from {MODEL_PATH}")
+            self.model = load_model(MODEL_PATH)
 
-            # Use memory-friendly flags. Force CPU device_map to reduce GPU/CUDA usage.
-            self.processor = AutoImageProcessor.from_pretrained(self.model_name)
-            self.model = AutoModelForImageClassification.from_pretrained(
-                self.model_name,
-                device_map={"": device},
-                low_cpu_mem_usage=True,
-            )
-
-            self.model.eval()
-            self._loaded = True
-            logger.info("Model loaded successfully!")
-            return True
-
-        except MemoryError as me:
-            logger.error(f"MemoryError loading model: {me}")
-            return False
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            return False
+        self._loaded = True
+        return True
 
     def preprocess_image(self, image_input):
         """
@@ -118,8 +235,9 @@ class EmotionDetector:
             image_input: Can be PIL Image, numpy array, or file path
 
         Returns:
-            PIL.Image: Processed image ready for model
+            np.array: Preprocessed image array
         """
+        image = None
         try:
             # Handle different input types
             if isinstance(image_input, str):
@@ -129,9 +247,6 @@ class EmotionDetector:
                 image = Image.open(image_input)
             elif isinstance(image_input, np.ndarray):
                 # Numpy array
-                if len(image_input.shape) == 3 and image_input.shape[2] == 3:
-                    # BGR to RGB conversion
-                    image_input = image_input[:, :, ::-1]
                 image = Image.fromarray(image_input)
             elif isinstance(image_input, Image.Image):
                 # PIL Image
@@ -139,58 +254,61 @@ class EmotionDetector:
             else:
                 raise ValueError("Unsupported image input type")
 
-            # Convert to RGB if needed
-            if image.mode != "RGB":
-                image = image.convert("RGB")
+            # Convert to grayscale
+            image = image.convert('L')
 
-            # Resize if too large (optimization)
-            max_size = 512
-            if max(image.size) > max_size:
-                image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            # Resize to 48x48
+            image = image.resize((48, 48))
 
-            return image
+            # Convert to array and normalize
+            image_array = np.array(image) / 255.0
+            image_array = image_array.reshape(1, 48, 48, 1)
+
+            # Close image if we opened it from file
+            if isinstance(image_input, str):
+                image.close()
+
+            return image_array
 
         except Exception as e:
+            if image and isinstance(image_input, str):
+                image.close()
             logger.error(f"Error preprocessing image: {str(e)}")
             raise
 
-    def predict_emotion(self, image_input, source="unknown"):
+    def predict_emotion(self, image_input, source="unknown", user_name=None):
         """
         Predict emotion from image
 
         Args:
             image_input: Image input (file path, PIL Image, or numpy array)
-            source (str): Source of the prediction ('flask', 'upload', etc.)
+            source (str): Source of the prediction
+            user_name (str): Name of the user
 
         Returns:
             dict: Contains 'emotion', 'confidence', and 'all_scores'
         """
         try:
-            if self.model is None or self.processor is None:
+            if self.model is None:
                 raise RuntimeError("Model not loaded. Call load_model() first.")
 
             # Preprocess image
-            image = self.preprocess_image(image_input)
-
-            # Process image for model input
-            inputs = self.processor(images=image, return_tensors="pt")
+            image_array = self.preprocess_image(image_input)
 
             # Make prediction
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            predictions = self.model.predict(image_array)[0]
 
             # Get prediction results
-            predicted_class_idx = predictions.argmax().item()
-            confidence = predictions.max().item()
+            predicted_class_idx = np.argmax(predictions)
+            confidence = float(predictions[predicted_class_idx])
 
             # Map to emotion label
             predicted_emotion = self.emotion_labels[predicted_class_idx]
 
-            # Create all scores dictionary
+            # Create all scores dictionary - convert numpy float32 to Python float
             all_scores = {}
             for i, emotion in enumerate(self.emotion_labels):
-                all_scores[emotion] = float(predictions[0][i].item())
+                all_scores[emotion] = float(predictions[i])
 
             # Log prediction to database
             self._log_prediction(
@@ -198,11 +316,12 @@ class EmotionDetector:
                 confidence,
                 image_input if isinstance(image_input, str) else "uploaded_image",
                 source,
+                user_name
             )
 
             result = {
                 "emotion": predicted_emotion,
-                "confidence": confidence,
+                "confidence": float(confidence),  # Ensure it's a Python float
                 "all_scores": all_scores,
             }
 
@@ -213,7 +332,7 @@ class EmotionDetector:
             logger.error(f"Error in prediction: {str(e)}")
             raise
 
-    def _log_prediction(self, emotion, confidence, image_path, source):
+    def _log_prediction(self, emotion, confidence, image_path, source, user_name):
         """Log prediction to database"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -221,10 +340,10 @@ class EmotionDetector:
 
             cursor.execute(
                 """
-                INSERT INTO predictions (timestamp, predicted_emotion, confidence, image_path, source)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO predictions (timestamp, user_name, predicted_emotion, confidence, image_path, source)
+                VALUES (?, ?, ?, ?, ?, ?)
             """,
-                (datetime.now().isoformat(), emotion, confidence, image_path, source),
+                (datetime.now().isoformat(), user_name, emotion, confidence, image_path, source),
             )
 
             conn.commit()
@@ -248,42 +367,37 @@ def get_emotion_detector():
     return _emotion_detector
 
 
-def predict_emotion(image_input, source="unknown"):
+def predict_emotion(image_input, source="unknown", user_name=None):
     """
     Predict emotion from image using the global detector
 
     Args:
         image_input: Image input (file path, PIL Image, or numpy array)
         source (str): Source of the prediction
+        user_name (str): Name of the user
 
     Returns:
         dict: Prediction results
     """
     detector = get_emotion_detector()
-    # Lazy-load the heavy model on first prediction (avoid startup OOM)
     if not detector._loaded:
-        if not detector.load_model(device="cpu"):
-            raise RuntimeError("Failed to load model due to memory constraints.")
-    return detector.predict_emotion(image_input, source)
+        detector.load_model()
+    return detector.predict_emotion(image_input, source, user_name)
 
 
 if __name__ == "__main__":
-    # Test the model
+    # Train the model if not exists
     try:
-        print("🧪 Testing Emotion Detection Model...")
+        print("🧪 Training Emotion Detection Model...")
         detector = get_emotion_detector()
+        detector.load_model()
+        print("✅ Model ready!")
 
-        if detector.model is not None:
-            print("✅ Model loaded successfully!")
+        # Test with a sample image
+        test_image = Image.new("L", (48, 48), color=128)  # Grayscale test image
+        result = predict_emotion(test_image, source="test", user_name="Test User")
 
-            # Create a test image
-            test_image = Image.new("RGB", (224, 224), color="lightblue")
-            result = predict_emotion(test_image, source="test")
-
-            print(f"Test prediction: {result['emotion']} ({result['confidence']:.3f})")
-            print("✅ Test completed!")
-        else:
-            print("❌ Model failed to load")
-
+        print(f"Test prediction: {result['emotion']} ({result['confidence']:.3f})")
+        print("✅ Test completed!")
     except Exception as e:
         print(f"❌ Test failed: {str(e)}")

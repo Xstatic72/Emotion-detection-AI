@@ -17,6 +17,10 @@
                 <div class="col-lg-8">
                     <div class="card main-card">
                         <div class="card-body p-4 p-md-5">
+                            <div class="mb-3">
+                                <label for="userName" class="form-label">Your Name (optional)</label>
+                                <input type="text" class="form-control" id="userName" name="user_name" placeholder="Enter your name">
+                            </div>
                             <form id="uploadForm" enctype="multipart/form-data">
                                 <div
                                     class="upload-zone"
@@ -46,6 +50,17 @@
                                     </div>
                                 </div>
                             </form>
+
+                            <div class="mt-4 text-center">
+                                <h5>Or use Live Capture</h5>
+                                <button type="button" id="startCameraBtn" class="btn btn-success me-2">Start Camera</button>
+                                <button type="button" id="captureBtn" class="btn btn-warning d-none">Capture & Analyze</button>
+                                <button type="button" id="stopCameraBtn" class="btn btn-danger d-none">Stop Camera</button>
+                            </div>
+                            <div id="cameraSection" class="mt-3 d-none">
+                                <video id="video" width="100%" height="auto" autoplay muted></video>
+                                <canvas id="canvas" style="display:none;"></canvas>
+                            </div>
 
                             <div id="loadingSpinner" class="text-center mt-4 d-none">
                                 <div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>
@@ -128,6 +143,15 @@
             const previewImage = document.getElementById("previewImage");
             const clearBtn = document.getElementById("clearBtn");
 
+            // Camera elements
+            const startCameraBtn = document.getElementById("startCameraBtn");
+            const captureBtn = document.getElementById("captureBtn");
+            const stopCameraBtn = document.getElementById("stopCameraBtn");
+            const video = document.getElementById("video");
+            const canvas = document.getElementById("canvas");
+            const cameraSection = document.getElementById("cameraSection");
+            let stream;
+
             uploadZone.addEventListener("click", () => fileInput.click());
             uploadZone.addEventListener("keydown", (e) => {
                 if (e.key === "Enter" || e.key === " ") {
@@ -185,6 +209,8 @@
 
                 const formData = new FormData();
                 formData.append("file", file);
+                const userName = document.getElementById('userName').value;
+                if (userName) formData.append("user_name", userName);
 
                 fetch("/predict", { method: "POST", body: formData })
                     .then((response) => response.json())
@@ -228,6 +254,46 @@
                 inner.style.width = confidence + '%';
 
                 document.getElementById('confidenceText').textContent = `${confidence}% confidence`;
+            }
+
+            // Camera functions
+            startCameraBtn.addEventListener("click", startCamera);
+            captureBtn.addEventListener("click", captureImage);
+            stopCameraBtn.addEventListener("click", stopCamera);
+
+            async function startCamera() {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    video.srcObject = stream;
+                    cameraSection.classList.remove('d-none');
+                    startCameraBtn.classList.add('d-none');
+                    captureBtn.classList.remove('d-none');
+                    stopCameraBtn.classList.remove('d-none');
+                } catch (error) {
+                    alert("Error accessing camera: " + error.message);
+                }
+            }
+
+            function captureImage() {
+                const context = canvas.getContext('2d');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                canvas.toBlob((blob) => {
+                    const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
+                    uploadFile(file);
+                }, 'image/jpeg');
+            }
+
+            function stopCamera() {
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+                video.srcObject = null;
+                cameraSection.classList.add('d-none');
+                startCameraBtn.classList.remove('d-none');
+                captureBtn.classList.add('d-none');
+                stopCameraBtn.classList.add('d-none');
             }
         </script>
     </body>

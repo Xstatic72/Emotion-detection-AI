@@ -93,51 +93,71 @@ def predict():
             ), 400
 
         if file and allowed_file(file.filename):
+            temp_file_path = None
             try:
                 with tempfile.NamedTemporaryFile(
                     delete=False, suffix=".jpg"
                 ) as temp_file:
-                    file.save(temp_file.name)
+                    temp_file_path = temp_file.name
+                    file.save(temp_file_path)
 
+                try:
+                    img = Image.open(temp_file_path)
+                    img.verify()
+                    img.close()  # Close the image before reopening
+                    
+                    img = Image.open(temp_file_path)
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    img.close()  # Close after processing
+
+                except Exception as img_error:
+                    if temp_file_path and os.path.exists(temp_file_path):
+                        try:
+                            os.unlink(temp_file_path)
+                        except:
+                            pass
+                    return jsonify(
+                        {"error": f"Invalid image file: {str(img_error)}"}
+                    ), 400
+
+                logger.info(
+                    f"Making prediction for uploaded image: {file.filename}"
+                )
+                user_name = request.form.get('user_name', None)
+                result = predict_emotion(temp_file_path, source="flask", user_name=user_name)
+
+                # Clean up temp file
+                if temp_file_path and os.path.exists(temp_file_path):
                     try:
-                        img = Image.open(temp_file.name)
-                        img.verify()
-                        img = Image.open(temp_file.name)
+                        os.unlink(temp_file_path)
+                    except Exception as e:
+                        logger.warning(f"Could not delete temp file: {e}")
 
-                        if img.mode != "RGB":
-                            img = img.convert("RGB")
+                response_data = {
+                    "success": True,
+                    "predicted_emotion": result["emotion"],
+                    "confidence": round(result["confidence"], 3),
+                    "all_scores": {
+                        k: round(v, 3) for k, v in result["all_scores"].items()
+                    },
+                    "filename": secure_filename(file.filename),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
 
-                    except Exception as img_error:
-                        os.unlink(temp_file.name)
-                        return jsonify(
-                            {"error": f"Invalid image file: {str(img_error)}"}
-                        ), 400
-
-                    logger.info(
-                        f"Making prediction for uploaded image: {file.filename}"
-                    )
-                    result = predict_emotion(temp_file.name, source="flask")
-
-                    os.unlink(temp_file.name)
-
-                    response_data = {
-                        "success": True,
-                        "predicted_emotion": result["emotion"],
-                        "confidence": round(result["confidence"], 3),
-                        "all_scores": {
-                            k: round(v, 3) for k, v in result["all_scores"].items()
-                        },
-                        "filename": secure_filename(file.filename),
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-
-                    logger.info(
-                        f"Prediction successful: {result['emotion']} ({result['confidence']:.3f})"
-                    )
-                    return jsonify(response_data)
+                logger.info(
+                    f"Prediction successful: {result['emotion']} ({result['confidence']:.3f})"
+                )
+                return jsonify(response_data)
 
             except Exception as process_error:
                 logger.error(f"Error processing image: {str(process_error)}")
+                # Ensure cleanup on error
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.unlink(temp_file_path)
+                    except:
+                        pass
                 return jsonify(
                     {"error": f"Error processing image: {str(process_error)}"}
                 ), 500
